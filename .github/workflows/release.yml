@@ -163,7 +163,7 @@ jobs:
           body: |
             Portable builds of foray v${{ env.VERSION }}.
 
-            - **Windows**: `foray-*-x86_64-windows.exe` (+ `WebView2Loader.dll` — keep both in the same folder; WebView2 Runtime preinstalled on Win 10/11)
+            - **Windows**: `foray-*-x86_64-windows.exe` — single portable file, just run it (WebView2 Runtime is preinstalled on Win 10/11)
             - **macOS**: `foray-*-universal-macos.app.zip` (universal aarch64 + x86_64; unsigned — right-click → Open on first launch)
             - **Linux**: `foray-*-x86_64-linux.AppImage` (requires FUSE on minimal distros)
 
