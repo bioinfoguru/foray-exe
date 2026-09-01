@@ -85,7 +85,7 @@ jobs:
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2 xvfb
 
       - name: Build (npm + tauri)
         working-directory: foray
@@ -102,6 +102,52 @@ jobs:
         working-directory: foray/src-tauri
         run: cargo build --release --target x86_64-apple-darwin
 
+
+      # --- Smoke tests: launch the app, verify it stays alive, kill it -------
+      # Proves the binary actually runs on each OS (bundle structure, dylib
+      # loading, webview init) — not just that it compiled.
+
+      - name: Smoke test (launch & quit)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $exe = "foray/src-tauri/target/x86_64-pc-windows-msvc/release/foray.exe"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 6
+          if ($p.HasExited) { Write-Error "app exited immediately (code $($p.ExitCode))"; exit 1 }
+          Write-Host "app is running - smoke test passed"
+          Stop-Process -Id $p.Id -Force
+
+      - name: Smoke test (launch & quit)
+        if: matrix.os == 'macos-latest'
+        working-directory: foray/src-tauri
+        shell: bash
+        run: |
+          APP="target/aarch64-apple-darwin/release/bundle/macos/foray.app/Contents/MacOS/foray"
+          "$APP" &
+          APP_PID=$!
+          sleep 6
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "app is running - smoke test passed"
+            kill $APP_PID
+          else
+            wait $APP_PID; echo "::error::app exited immediately (code $?)"; exit 1
+          fi
+
+      - name: Smoke test (xvfb, launch & quit)
+        if: matrix.os == 'ubuntu-22.04'
+        working-directory: foray/src-tauri
+        shell: bash
+        run: |
+          xvfb-run -a ./target/x86_64-unknown-linux-gnu/release/foray &
+          APP_PID=$!
+          sleep 6
+          if kill -0 $APP_PID 2>/dev/null; then
+            echo "app is running - smoke test passed"
+            kill $APP_PID
+          else
+            wait $APP_PID; echo "::error::app exited immediately (code $?)"; exit 1
+          fi
 
       # --- Per-OS artifact staging -------------------------------------------
       - name: Stage Windows portable artifacts
