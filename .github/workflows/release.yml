@@ -1,0 +1,166 @@
+# ci/public-release.yml
+#
+# This workflow is copied into the PUBLIC repo (bioinfoguru/foray-exe) at
+# .github/workflows/release.yml by `foray.bat setup-public`. It must keep the
+# name "release" — `foray.bat release` triggers it via `gh workflow run release`.
+#
+# What it does:
+#   1. Clones the PRIVATE repo (bioinfoguru/foray) at tag v<version> using the
+#      read-only deploy key stored in secret PRIVATE_REPO_DEPLOY_KEY.
+#   2. Builds the portable binaries for all three OSes (plan §7):
+#        - Windows: bare foray.exe + WebView2Loader.dll  (bundle targets: [])
+#        - macOS:   universal .app.zip                   (bundle targets: ["app"])
+#        - Linux:   .AppImage                            (bundle targets: ["appimage"])
+#   3. Publishes a GitHub Release on THIS (public) repo with SHA256SUMS.txt.
+#
+# Required secrets (set in the PUBLIC repo):
+#   PRIVATE_REPO_DEPLOY_KEY — private half of foray_deploy (ed25519)
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.0 (tag v<version> must exist in the private repo)"
+        required: true
+  repository_dispatch:
+    types: [foray-release]
+
+permissions:
+  contents: write
+
+env:
+  PRIVATE_REPO: git@github.com:bioinfoguru/foray.git
+  VERSION: ${{ github.event.inputs.version || github.event.client_payload.version }}
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: Install SSH deploy key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PRIVATE_REPO_DEPLOY_KEY }}
+
+      - name: Add GitHub host key
+        run: ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true
+        shell: bash
+
+      - name: Clone private repo at tag v${{ env.VERSION }}
+        run: |
+          git clone --depth 1 --branch "v${{ env.VERSION }}" "$PRIVATE_REPO" foray
+          git -C foray describe --tags
+        shell: bash
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Add second macOS target for universal build
+        if: matrix.os == 'macos-latest'
+        run: rustup target add x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: foray/src-tauri
+
+      - name: Install Linux system deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libfuse2
+
+      - name: Build (npm + tauri)
+        working-directory: foray
+        run: |
+          npm ci
+          npm run tauri build -- --target ${{ matrix.rust_target }}
+        shell: bash
+
+
+      # --- Per-OS artifact staging -------------------------------------------
+      - name: Stage Windows portable artifacts
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item foray/src-tauri/target/x86_64-pc-windows-msvc/release/foray.exe stage/foray-${{ env.VERSION }}-x86_64-windows.exe
+          # WebView2Loader.dll sits next to the exe (plan §7)
+          $dll = Get-ChildItem -Recurse foray/src-tauri/target/x86_64-pc-windows-msvc/release -Filter WebView2Loader.dll | Select-Object -First 1
+          if ($dll) { Copy-Item $dll.FullName stage/ }
+
+      - name: Stage macOS universal app
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          SRC_A=foray/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/foray.app
+          SRC_B=foray/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/foray.app
+          rm -rf universal.app && cp -R "$SRC_A" universal.app
+          for BIN in universal.app/Contents/MacOS/*; do
+            lipo -create "$SRC_A/Contents/MacOS/$(basename "$BIN")" \
+                       "$SRC_B/Contents/MacOS/$(basename "$BIN")" \
+                       -output "$BIN"
+          done
+          zip -r -y "foray-${{ env.VERSION }}-universal-macos.app.zip" universal.app
+          mkdir stage && mv "foray-${{ env.VERSION }}-universal-macos.app.zip" stage/
+
+      - name: Stage Linux AppImage
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          mkdir stage
+          cp foray/src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage \
+             "stage/foray-${{ env.VERSION }}-x86_64-linux.AppImage"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: stage/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: artifacts
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release (public repo)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: foray v${{ env.VERSION }}
+          body: |
+            Portable builds of foray v${{ env.VERSION }}.
+
+            - **Windows**: `foray-*-x86_64-windows.exe` (+ `WebView2Loader.dll` — keep both in the same folder; WebView2 Runtime preinstalled on Win 10/11)
+            - **macOS**: `foray-*-universal-macos.app.zip` (universal aarch64 + x86_64; unsigned — right-click → Open on first launch)
+            - **Linux**: `foray-*-x86_64-linux.AppImage` (requires FUSE on minimal distros)
+
+            Verify integrity with `SHA256SUMS.txt` (plan §7.3).
+          files: artifacts/*
+          fail_on_unmatched_files: true
