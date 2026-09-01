@@ -102,9 +102,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path stage | Out-Null
           Copy-Item foray/src-tauri/target/x86_64-pc-windows-msvc/release/foray.exe stage/foray-${{ env.VERSION }}-x86_64-windows.exe
-          # WebView2Loader.dll sits next to the exe (plan §7)
-          $dll = Get-ChildItem -Recurse foray/src-tauri/target/x86_64-pc-windows-msvc/release -Filter WebView2Loader.dll | Select-Object -First 1
-          if ($dll) { Copy-Item $dll.FullName stage/ }
+          # Single portable exe: WebView2Loader is statically linked in Tauri v2.
 
       - name: Stage macOS universal app
         if: matrix.os == 'macos-latest'
