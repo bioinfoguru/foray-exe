@@ -94,6 +94,14 @@ jobs:
           npm run tauri build -- --target ${{ matrix.rust_target }}
         shell: bash
 
+      # Universal macOS: the tauri build above produced the aarch64 .app
+      # bundle; here we build only the x86_64 raw binary (no bundling) and
+      # lipo the two binaries into one universal .app.
+      - name: Build x86_64 binary for universal macOS
+        if: matrix.os == 'macos-latest'
+        working-directory: foray/src-tauri
+        run: cargo build --release --target x86_64-apple-darwin
+
 
       # --- Per-OS artifact staging -------------------------------------------
       - name: Stage Windows portable artifacts
@@ -108,14 +116,14 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
-          SRC_A=foray/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/foray.app
-          SRC_B=foray/src-tauri/target/x86_64-apple-darwin/release/bundle/macos/foray.app
-          rm -rf universal.app && cp -R "$SRC_A" universal.app
-          for BIN in universal.app/Contents/MacOS/*; do
-            lipo -create "$SRC_A/Contents/MacOS/$(basename "$BIN")" \
-                       "$SRC_B/Contents/MacOS/$(basename "$BIN")" \
-                       -output "$BIN"
-          done
+          APP=foray/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/foray.app
+          BIN_A=foray/src-tauri/target/aarch64-apple-darwin/release/foray
+          BIN_B=foray/src-tauri/target/x86_64-apple-darwin/release/foray
+          test -f "$BIN_A" && test -f "$BIN_B" || { echo "missing built binaries"; exit 1; }
+          rm -rf universal.app && cp -R "$APP" universal.app
+          # Replace the arm64 binary with a universal (arm64 + x86_64) one.
+          lipo -create "$BIN_A" "$BIN_B" -output universal.app/Contents/MacOS/foray
+          lipo -info universal.app/Contents/MacOS/foray
           zip -r -y "foray-${{ env.VERSION }}-universal-macos.app.zip" universal.app
           mkdir stage && mv "foray-${{ env.VERSION }}-universal-macos.app.zip" stage/
 
